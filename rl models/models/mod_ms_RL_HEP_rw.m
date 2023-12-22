@@ -1,0 +1,173 @@
+function [fval,fit] = mod_ms_RL_HEP_rw(behavData,q, doprior,dofit,varargin)
+% runs standard RL model
+% MK Wittmann, Oct 2018
+%
+% INPUT:    - behavData: behavioural input file
+% OUTPUT:   - fval and fitted variables
+% 
+% 
+%
+%%
+% -------------------------------------------------------------------------------------
+% 1 ) Define free parameters
+% -------------------------------------------------------------------------------------
+
+if nargin > 4
+    prior      = varargin{1};
+end
+
+qt = norm2par('ms_RL_HEP_rw',q); % transform parameters from gaussian space to model space
+
+
+% Define free parameters and set unused ones to zero
+lrate        = qt(1);  
+beta         = qt(2);                     
+choice_corr  = qt(3);  
+trace        = qt(4);
+
+% -------------------------------------------------------------------------------------
+% 2-4) Middle code is the same for all models
+% -------------------------------------------------------------------------------------
+
+% Body of RL model that can run CL-trace, CS-trace and RT-trace. Compatible with all RL models.
+% Ran directly from modms_RL_cl_cs_rt etc scripts
+% MKW, Oct 2018
+%%
+
+% -------------------------------------------------------------------------------------
+% 1 ) Define stuff, get variables
+% -------------------------------------------------------------------------------------
+
+% define behaviour on which model is fitted:
+rt                = behavData.outcome;
+offers            = behavData.offers;                                         % column 1 refers to right option, columm 2 refers to left option
+choice            = behavData.choice_id;
+choice(choice==2)=-1;
+for it=1:length(rt)
+    if choice(it)==1 && rt(it)==1
+        rt(it)=1;
+    elseif choice(it)==-1 && rt(it)==1
+        rt(it)=-1;
+    elseif choice(it)==-1 && rt(it)==0
+        rt(it)=1;
+    elseif choice(it)==1 && rt(it)==0
+        rt(it)=-1;
+    end
+end
+stimuli           = behavData.stimuli;
+stim1 = behavData.stimuli(:,1);
+cue               = sum(stimuli,2)-1;
+
+% prepare variables to collect information of interest
+num_opt     = 2;
+allvals     = nan(numel(rt),num_opt);
+ChoiceProb  = nan(numel(rt),1);
+stim1_val   = nan(numel(rt),1);
+stim2_val   = nan(numel(rt),1);
+pe          = nan(numel(rt),1);
+pred_var    = nan(numel(rt),1);
+prevch      = nan(numel(rt),1);
+prevch(1)   = 0;
+
+% define starting values:
+allvals(1,:)    = zeros(1,num_opt);                                                    % order: [option1 option2 option3] % was 0 before sep18
+
+
+for it = 1:numel(rt)
+    
+    if it>1
+        prevch(it) = choice(it-1);
+    end
+    
+    % -------------------------------------------------------------------------------------
+    % 2 ) Learning model:
+    % -------------------------------------------------------------------------------------
+    if cue(it)==1
+        predch(it) = 0.5*allvals(it,1) + 0.5*allvals(it,1);
+        pe(it) = rt(it) - predch(it);
+        if stim1(it)==1
+            allvals(it+1,1) = allvals(it,1) + lrate*pe(it) + trace;
+            allvals(it+1,2) = allvals(it,2) - trace;
+        elseif stim1(it)==2
+            allvals(it+1,1) = allvals(it,1) + lrate*pe(it) - trace;
+            allvals(it+1,2) = allvals(it,2) + trace;
+        end
+    elseif cue(it)==2
+        predch(it) = 0.5*allvals(it,1) + 0.5*allvals(it,2);
+        pe(it) = rt(it) - predch(it);
+        if stim1(it)==1
+            allvals(it+1,1) = allvals(it,1) + lrate*pe(it) + trace;
+            allvals(it+1,2) = allvals(it,2) + lrate*pe(it) - trace;
+        elseif stim1(it)==2
+            allvals(it+1,1) = allvals(it,1) + lrate*pe(it) - trace;
+            allvals(it+1,2) = allvals(it,2) + lrate*pe(it) + trace;
+        end
+    elseif cue(it)==3
+        predch(it) = 0.5*allvals(it,2) + 0.5*allvals(it,2);
+        pe(it) = rt(it) - predch(it);
+        if stim1(it)==1
+            allvals(it+1,2) = allvals(it,2) + lrate*pe(it) - trace;
+            allvals(it+1,1) = allvals(it,1) + trace;
+        elseif stim1(it)==2
+            allvals(it+1,2) = allvals(it,2) + lrate*pe(it) + trace;
+            allvals(it+1,1) = allvals(it,1) - trace;
+        end
+    end
+    
+    % -------------------------------------------------------------------------------------
+    % 3 ) Observation model:
+    % -------------------------------------------------------------------------------------
+    
+    dv(it) = beta*(predch(it) - .5) + choice_corr*prevch(it);
+    ChoiceProb(it) = 1 / (1 + exp(-dv(it)));
+    
+end
+allvals(end,:)=[];
+
+
+% -------------------------------------------------------------------------------------
+% 4 ) Calculate model fit:
+% -------------------------------------------------------------------------------------
+
+% find when 1 was actually choosen:
+choice_bin = (choice == 1);
+nll =-nansum(choice_bin.*log(ChoiceProb));   % the thing to minimize
+
+if doprior == 0                                                               % NLL fit
+    fval = nll;
+elseif doprior == 1                                                           % EM-fit:   P(Choices | h) * P(h | O) should be maximised, therefore same as minimizing it with negative sign
+    fval = -(-nll + prior.logpdf(q));
+end
+
+if sum(isnan(ChoiceProb))>0, disp('ERROR'); keyboard; return; end                    % error check
+
+
+%--------------------------------------------------
+
+if isinf(fval)
+    e=1;
+else
+    e=0;
+end
+
+% -------------------------------------------------------------------------------------
+% 5) Calculate additional Parameters and save: 
+% -------------------------------------------------------------------------------------
+
+if dofit ==1
+   vsum = sum(allvals,2);
+   
+   fit         = struct;
+   fit.xnames  = {'alpha'; 'beta';'Choice_corr'};
+   
+   fit.mat    = [allvals  ChoiceProb dv' ...
+                  predch' pe];
+   fit.names  = {'V1';'V2'; 'ChoiceProb' ; 'DV'; ...
+                  'PredVariable';'PE'};
+end
+
+
+
+
+end
+
